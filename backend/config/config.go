@@ -10,6 +10,7 @@ import (
 type Config struct {
 	UDPPort        int
 	HTTPAddr       string
+	MetricsAddr    string
 	ClickHouseDSN  string
 	MQTTBroker     string
 	MQTTClientID   string
@@ -118,6 +119,7 @@ func Load() *Config {
 	cfg := &Config{
 		UDPPort:        getEnvInt("UDP_PORT", 8080),
 		HTTPAddr:       getEnvStr("HTTP_ADDR", ":8081"),
+		MetricsAddr:    getEnvStr("METRICS_ADDR", ":9090"),
 		ClickHouseDSN:  getEnvStr("CLICKHOUSE_DSN", "clickhouse://localhost:9000?database=ballistics&username=default&password="),
 		MQTTBroker:     getEnvStr("MQTT_BROKER", "tcp://localhost:1883"),
 		MQTTClientID:   getEnvStr("MQTT_CLIENT_ID", "ballistics-alert"),
@@ -129,7 +131,7 @@ func Load() *Config {
 		DynamicsPath:   getEnvStr("DYNAMICS_CONFIG_PATH", "config/dynamics_params.json"),
 		ArmorPath:      getEnvStr("ARMOR_CONFIG_PATH", "config/armor_params.json"),
 	}
-	log.Printf("Config loaded: UDP=%d HTTP=%s", cfg.UDPPort, cfg.HTTPAddr)
+	log.Printf("Config loaded: UDP=%d HTTP=%s METRICS=%s", cfg.UDPPort, cfg.HTTPAddr, cfg.MetricsAddr)
 	return cfg
 }
 

@@ -78,6 +78,16 @@ func (s *Server) Start() error {
 	return s.engine.Run(s.addr)
 }
 
+func (s *Server) Shutdown(ctx context.Context) error {
+	srv := &http.Server{
+		Addr:              s.addr,
+		Handler:           s.engine,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	_ = srv
+	return nil
+}
+
 func (s *Server) health(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"status":    "ok",

@@ -12,22 +12,44 @@ import (
 )
 
 type AlarmService struct {
-	pusher        *AlertPusher
-	checker       *AlertChecker
+	pusher         *AlertPusher
+	checker        *AlertChecker
 	deformationMax float64
 	minRange       float64
+	Metrics        AlarmMetricsHooks
 }
+
+type AlarmMetricsHooks interface {
+	IncAlert(level, typ string)
+	IncMQTTReconnect()
+	IncMQTTPublish()
+}
+
+type noopAlarmMetrics struct{}
+
+func (noopAlarmMetrics) IncAlert(string, string)     {}
+func (noopAlarmMetrics) IncMQTTReconnect()          {}
+func (noopAlarmMetrics) IncMQTTPublish()            {}
 
 func NewAlarmService(broker, clientID, topic, username, password string, deformationMax, minRange float64) *AlarmService {
 	pusher := NewAlertPusher(broker, clientID, topic, username, password)
 	checker := NewAlertChecker(deformationMax, minRange)
 
 	return &AlarmService{
-		pusher:        pusher,
-		checker:       checker,
+		pusher:         pusher,
+		checker:        checker,
 		deformationMax: deformationMax,
 		minRange:       minRange,
+		Metrics:        noopAlarmMetrics{},
 	}
+}
+
+func (s *AlarmService) WithMetrics(m AlarmMetricsHooks) *AlarmService {
+	s.Metrics = m
+	if s.pusher != nil {
+		s.pusher.metrics = m
+	}
+	return s
 }
 
 func (s *AlarmService) CheckSensor(data *models.SensorData) []*models.Alert {
@@ -54,6 +76,7 @@ func (s *AlarmService) Stop() {
 
 func (s *AlarmService) RunAlertWorker(alertCh <-chan *models.Alert, storeFn func(*models.Alert)) {
 	for alert := range alertCh {
+		s.Metrics.IncAlert(alert.AlertLevel, alert.AlertType)
 		if storeFn != nil {
 			storeFn(alert)
 		}
@@ -67,6 +90,7 @@ type AlertPusher struct {
 	topic     string
 	broker    string
 	alertChan chan *models.Alert
+	metrics   AlarmMetricsHooks
 }
 
 func NewAlertPusher(broker, clientID, topic, username, password string) *AlertPusher {
@@ -88,6 +112,9 @@ func NewAlertPusher(broker, clientID, topic, username, password string) *AlertPu
 	}
 	opts.OnConnectionLost = func(c mqtt.Client, err error) {
 		log.Printf("[alarm_mqtt] Connection lost: %v", err)
+		if pusher.metrics != nil {
+			pusher.metrics.IncMQTTReconnect()
+		}
 	}
 
 	pusher := &AlertPusher{
@@ -139,6 +166,9 @@ func (p *AlertPusher) publishAlert(alert *models.Alert) {
 		if token.Error() != nil {
 			log.Printf("[alarm_mqtt] Publish error: %v", token.Error())
 		} else {
+			if p.metrics != nil {
+				p.metrics.IncMQTTPublish()
+			}
 			log.Printf("[alarm_mqtt] Published: %s - %s", alert.AlertType, alert.Message)
 		}
 	}()

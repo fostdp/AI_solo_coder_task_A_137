@@ -12,13 +12,33 @@ type Analyzer struct {
 	armors     map[string]config.ArmorEntryConfig
 	arrowHeads map[string]config.ArrowHeadEntryConfig
 	gyro       config.GyroConfig
+	Metrics    PenMetricsHooks
 }
+
+type PenMetricsHooks interface {
+	IncPenetration()
+	ObservePenDuration(d float64)
+	ObservePenetrationDepth(mm float64)
+	IncActivePen()
+	DecActivePen()
+	SetPendingPen(n int)
+}
+
+type noopPenMetrics struct{}
+
+func (noopPenMetrics) IncPenetration()              {}
+func (noopPenMetrics) ObservePenDuration(float64)    {}
+func (noopPenMetrics) ObservePenetrationDepth(float64) {}
+func (noopPenMetrics) IncActivePen()                {}
+func (noopPenMetrics) DecActivePen()                {}
+func (noopPenMetrics) SetPendingPen(int)            {}
 
 func NewAnalyzer(armorCfg *config.ArmorConfig) *Analyzer {
 	return &Analyzer{
 		armors:     armorCfg.Armors,
 		arrowHeads: armorCfg.ArrowHeads,
 		gyro:       armorCfg.Gyro,
+		Metrics:    noopPenMetrics{},
 	}
 }
 
@@ -225,11 +245,18 @@ func (a *Analyzer) ToArmorPerformance(r *models.PenetrationResult) *models.Armor
 
 func (a *Analyzer) RunPenetrationWorker(jobCh <-chan *models.PenJob, resultCh chan<- *models.PenetrationResult) {
 	for job := range jobCh {
+		a.Metrics.SetPendingPen(len(jobCh))
+		a.Metrics.IncActivePen()
+		start := time.Now()
 		result := a.AnalyzeWithSpin(
 			job.ImpactVelocity, job.ArrowMass, job.ArrowDiameter,
 			job.ArrowLength, job.SpinRate, job.ArmorType,
 			job.ArrowHeadType, job.ArmorThickness,
 		)
+		a.Metrics.ObservePenDuration(time.Since(start).Seconds())
+		a.Metrics.ObservePenetrationDepth(result.PenetrationDepth * 1000)
+		a.Metrics.IncPenetration()
+		a.Metrics.DecActivePen()
 		resultCh <- result
 	}
 }

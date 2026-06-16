@@ -11,17 +11,38 @@ import (
 	"ballistics-system/models"
 )
 
+type MetricsHooks interface {
+	ObserveUDPSize(n int)
+	IncSensorPackets()
+	IncInvalidPackets()
+	SetPendingSensor(n int)
+}
+
+type noopMetrics struct{}
+
+func (noopMetrics) ObserveUDPSize(int)           {}
+func (noopMetrics) IncSensorPackets()            {}
+func (noopMetrics) IncInvalidPackets()           {}
+func (noopMetrics) SetPendingSensor(int)         {}
+
 type Receiver struct {
 	port     int
 	conn     *net.UDPConn
 	dataChan chan<- *models.ValidatedSensorData
+	metrics  MetricsHooks
 }
 
 func NewReceiver(port int, dataChan chan<- *models.ValidatedSensorData) *Receiver {
 	return &Receiver{
 		port:     port,
 		dataChan: dataChan,
+		metrics:  noopMetrics{},
 	}
+}
+
+func (r *Receiver) WithMetrics(m MetricsHooks) *Receiver {
+	r.metrics = m
+	return r
 }
 
 func (r *Receiver) Start() error {
@@ -49,10 +70,13 @@ func (r *Receiver) receiveLoop() {
 			log.Printf("[udp_receiver] Read error from %v: %v", remoteAddr, err)
 			continue
 		}
+		r.metrics.ObserveUDPSize(n)
+		r.metrics.IncSensorPackets()
 
 		var data models.SensorData
 		if err := json.Unmarshal(buf[:n], &data); err != nil {
 			log.Printf("[udp_receiver] JSON parse error: %v, raw: %s", err, string(buf[:n]))
+			r.metrics.IncInvalidPackets()
 			continue
 		}
 
@@ -62,8 +86,10 @@ func (r *Receiver) receiveLoop() {
 
 		validated := r.validate(data)
 		if validated.IsValid {
+			r.metrics.SetPendingSensor(len(r.dataChan))
 			r.dataChan <- validated
 		} else {
+			r.metrics.IncInvalidPackets()
 			log.Printf("[udp_receiver] Invalid data from %s: %v", data.DeviceID, validated.Errors)
 		}
 	}

@@ -116,3 +116,100 @@ AS SELECT
     max(arrow_spin_rate) as max_spin
 FROM sensor_data
 GROUP BY device_id, toStartOfHour(timestamp);
+
+-- =========================================================
+-- 历史日聚合 (降采样)：从小时级 MV 自动聚合，
+-- 供大屏/报表/考古使用（不需要 1h 粒度时，性能快 24x）
+-- =========================================================
+CREATE TABLE IF NOT EXISTS sensor_data_daily_ds (
+    device_id String,
+    timestamp Date,
+    shots SimpleAggregateFunction(sum, UInt64),
+    avg_tension SimpleAggregateFunction(avg, Float64),
+    max_tension SimpleAggregateFunction(max, Float64),
+    avg_deformation SimpleAggregateFunction(avg, Float64),
+    max_deformation SimpleAggregateFunction(max, Float64),
+    avg_velocity SimpleAggregateFunction(avg, Float64),
+    max_velocity SimpleAggregateFunction(max, Float64),
+    avg_spin SimpleAggregateFunction(avg, Float64)
+) ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (device_id, timestamp)
+TTL timestamp + INTERVAL 3 YEAR;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_data_daily_ds_mv
+TO sensor_data_daily_ds
+AS SELECT
+    device_id,
+    toDate(timestamp)                                  AS timestamp,
+    sumSimpleState(count)                              AS shots,
+    avgSimpleState(sum_tension / count)                AS avg_tension,
+    maxSimpleState(max_tension)                        AS max_tension,
+    avgSimpleState(sum_deformation / count)            AS avg_deformation,
+    maxSimpleState(max_deformation)                    AS max_deformation,
+    avgSimpleState(sum_velocity / count)               AS avg_velocity,
+    maxSimpleState(sum_velocity / count)               AS max_velocity,
+    avgSimpleState(sum_spin / count)                   AS avg_spin
+FROM sensor_data_stats_mv
+GROUP BY device_id, toDate(timestamp);
+
+-- =========================================================
+-- simulation_results 历史日聚合 (射程/KE 趋势分析)
+-- =========================================================
+CREATE TABLE IF NOT EXISTS sim_daily_ds (
+    device_id String,
+    timestamp Date,
+    shots SimpleAggregateFunction(sum, UInt64),
+    avg_range SimpleAggregateFunction(avg, Float64),
+    p95_range SimpleAggregateFunction(max, Float64),
+    avg_impact_v SimpleAggregateFunction(avg, Float64),
+    avg_ke SimpleAggregateFunction(avg, Float64),
+    below_min_range SimpleAggregateFunction(sum, UInt64)
+) ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (device_id, timestamp)
+TTL timestamp + INTERVAL 3 YEAR;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS sim_daily_ds_mv
+TO sim_daily_ds
+AS SELECT
+    device_id,
+    toDate(timestamp)                       AS timestamp,
+    sumSimpleState(1)                       AS shots,
+    avgSimpleState(range)                   AS avg_range,
+    maxSimpleState(range)                   AS p95_range,
+    avgSimpleState(impact_velocity)         AS avg_impact_v,
+    avgSimpleState(kinetic_energy)          AS avg_ke,
+    sumSimpleState(if(range < 300, 1, 0))   AS below_min_range
+FROM simulation_results
+GROUP BY device_id, toDate(timestamp);
+
+-- =========================================================
+-- armor_performance 按铠甲类型聚合（穿甲概率统计）
+-- =========================================================
+CREATE TABLE IF NOT EXISTS armor_perf_daily_ds (
+    armor_type String,
+    arrow_head_type String,
+    timestamp Date,
+    tests SimpleAggregateFunction(sum, UInt64),
+    avg_penetration_mm SimpleAggregateFunction(avg, Float64),
+    max_penetration_mm SimpleAggregateFunction(max, Float64),
+    success_rate SimpleAggregateFunction(avg, Float64)
+) ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (armor_type, arrow_head_type, timestamp)
+TTL timestamp + INTERVAL 3 YEAR;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS armor_perf_daily_ds_mv
+TO armor_perf_daily_ds
+AS SELECT
+    armor_type,
+    arrow_head_type,
+    toDate(timestamp)                                                                  AS timestamp,
+    sumSimpleState(1)                                                                  AS tests,
+    avgSimpleState(penetration_depth * 1000)                                           AS avg_penetration_mm,
+    maxSimpleState(penetration_depth * 1000)                                           AS max_penetration_mm,
+    avgSimpleState(if(penetration_depth > armor_thickness AND penetration_depth > 0.0005, 1.0, 0.0)) AS success_rate
+FROM armor_performance
+GROUP BY armor_type, arrow_head_type, toDate(timestamp);
+

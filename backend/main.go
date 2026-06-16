@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	ch "ballistics-system/clickhouse"
 	"ballistics-system/config"
+	"ballistics-system/metrics"
 	"ballistics-system/models"
 
 	alarm_mqtt "ballistics-system/alarm_mqtt"
@@ -22,28 +24,71 @@ import (
 	"ballistics-system/api"
 )
 
+type metricsAdapter struct {
+	m *metrics.Metrics
+}
+
+func (a *metricsAdapter) ObserveUDPSize(n int)                       { a.m.UDPSizeBytes.Observe(float64(n)) }
+func (a *metricsAdapter) IncSensorPackets()                         { a.m.SensorPacketsTotal.Inc() }
+func (a *metricsAdapter) IncInvalidPackets()                        { a.m.SensorPacketsInvalid.Inc() }
+func (a *metricsAdapter) SetPendingSensor(n int)                    { a.m.PendingSensorCount.Set(float64(n)) }
+func (a *metricsAdapter) IncSimulation()                            { a.m.SimulationsTotal.Inc() }
+func (a *metricsAdapter) ObserveSimDuration(d float64)              { a.m.SimDurationSeconds.Observe(d) }
+func (a *metricsAdapter) ObserveImpactVelocity(v float64)           { a.m.ImpactVelocity.Observe(v) }
+func (a *metricsAdapter) IncActiveSim()                             { a.m.ActiveSimulations.Inc() }
+func (a *metricsAdapter) DecActiveSim()                             { a.m.ActiveSimulations.Dec() }
+func (a *metricsAdapter) SetPendingSim(n int)                       { a.m.PendingSimCount.Set(float64(n)) }
+func (a *metricsAdapter) IncPenetration()                           { a.m.PenetrationsTotal.Inc() }
+func (a *metricsAdapter) ObservePenDuration(d float64)              { a.m.PenDurationSeconds.Observe(d) }
+func (a *metricsAdapter) ObservePenetrationDepth(mm float64)        { a.m.PenetrationDepth.Observe(mm) }
+func (a *metricsAdapter) IncActivePen()                             { a.m.ActivePenetrations.Inc() }
+func (a *metricsAdapter) DecActivePen()                             { a.m.ActivePenetrations.Dec() }
+func (a *metricsAdapter) SetPendingPen(n int)                       { a.m.PendingPenCount.Set(float64(n)) }
+func (a *metricsAdapter) IncAlert(level, typ string)                { a.m.AlertsTotal.WithLabelValues(level, typ).Inc() }
+func (a *metricsAdapter) IncMQTTReconnect()                         { a.m.MQTTReconnectsTotal.Inc() }
+func (a *metricsAdapter) IncMQTTPublish()                           { a.m.MQTTMessagesTotal.Inc() }
+func (a *metricsAdapter) IncDBInsert(table string)                  { a.m.DBInsertsTotal.WithLabelValues(table).Inc() }
+func (a *metricsAdapter) IncDBInsertError(table string)             { a.m.DBInsertErrorsTotal.WithLabelValues(table).Inc() }
+
 func main() {
 	cfg := config.Load()
 
 	dynCfg := config.LoadDynamics(cfg.DynamicsPath)
 	armorCfg := config.LoadArmor(cfg.ArmorPath)
 
-	store, err := ch.NewStore(cfg.ClickHouseDSN)
-	if err != nil {
+	m := metrics.New()
+	adp := &metricsAdapter{m: m}
+
+	metricsAddr := cfg.MetricsAddr
+	if metricsAddr == "" {
+		metricsAddr = ":9090"
+	}
+	metricsSrv := m.StartMetricsServer(metricsAddr)
+	log.Printf("Metrics/pprof server on %s (/metrics, /debug/pprof/)", metricsAddr)
+
+	var store *ch.Store
+	if s, err := ch.NewStore(cfg.ClickHouseDSN); err != nil {
 		log.Printf("Warning: ClickHouse connection failed: %v", err)
 		log.Println("Continuing without database...")
+	} else {
+		s.Metrics = adp
+		store = s
 	}
 	if store != nil {
 		defer store.Close()
 	}
 
 	simEngine := ballistic_simulator.NewSimulator(dynCfg)
+	simEngine.Metrics = adp
+
 	penAnalyzer := penetration_analyzer.NewAnalyzer(armorCfg)
+	penAnalyzer.Metrics = adp
+
 	alarmService := alarm_mqtt.NewAlarmService(
 		cfg.MQTTBroker, cfg.MQTTClientID, cfg.MQTTTopic,
 		cfg.MQTTUsername, cfg.MQTTPassword,
 		cfg.DeformationMax, cfg.MinRange,
-	)
+	).WithMetrics(adp)
 	defer alarmService.Stop()
 
 	sensorDataCh := make(chan *models.ValidatedSensorData, 1000)
@@ -54,6 +99,7 @@ func main() {
 	alertCh := make(chan *models.Alert, 100)
 
 	udpReceiver := udp_receiver.NewReceiver(cfg.UDPPort, sensorDataCh)
+	udpReceiver = udpReceiver.WithMetrics(adp)
 	if err := udpReceiver.Start(); err != nil {
 		log.Fatalf("Failed to start UDP receiver: %v", err)
 	}
@@ -98,6 +144,7 @@ func main() {
 	log.Println("Ballistics System started successfully")
 	log.Printf("  UDP port: %d", cfg.UDPPort)
 	log.Printf("  HTTP addr: %s", cfg.HTTPAddr)
+	log.Printf("  Metrics/pprof: %s", metricsAddr)
 	log.Printf("  MQTT broker: %s", cfg.MQTTBroker)
 	log.Printf("  Dynamics config: %s", cfg.DynamicsPath)
 	log.Printf("  Armor config: %s", cfg.ArmorPath)
@@ -107,6 +154,13 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if metricsSrv != nil {
+		_ = metricsSrv.Shutdown(shutdownCtx)
+	}
+	_ = httpServer.Shutdown(shutdownCtx)
+
 	time.Sleep(500 * time.Millisecond)
 	log.Println("Ballistics System stopped")
 }
@@ -290,3 +344,4 @@ func (o *pipelineOrchestrator) awaitSimResult(
 }
 
 var _ = fmt.Sprintf
+var _ = http.StatusOK

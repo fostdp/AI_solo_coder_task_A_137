@@ -13,14 +13,34 @@ type Simulator struct {
 	sim    config.SimulationConfig
 	def    config.DefaultsConfig
 	aero   config.AerodynamicsConfig
+	Metrics SimMetricsHooks
 }
+
+type SimMetricsHooks interface {
+	IncSimulation()
+	ObserveSimDuration(d float64)
+	ObserveImpactVelocity(v float64)
+	IncActiveSim()
+	DecActiveSim()
+	SetPendingSim(n int)
+}
+
+type noopSimMetrics struct{}
+
+func (noopSimMetrics) IncSimulation()           {}
+func (noopSimMetrics) ObserveSimDuration(float64)  {}
+func (noopSimMetrics) ObserveImpactVelocity(float64) {}
+func (noopSimMetrics) IncActiveSim()            {}
+func (noopSimMetrics) DecActiveSim()            {}
+func (noopSimMetrics) SetPendingSim(int)        {}
 
 func NewSimulator(dynCfg *config.DynamicsConfig) *Simulator {
 	return &Simulator{
-		bow:  dynCfg.Bow,
-		sim:  dynCfg.Simulation,
-		def:  dynCfg.Defaults,
-		aero: dynCfg.Aerodynamics,
+		bow:     dynCfg.Bow,
+		sim:     dynCfg.Simulation,
+		def:     dynCfg.Defaults,
+		aero:    dynCfg.Aerodynamics,
+		Metrics: noopSimMetrics{},
 	}
 }
 
@@ -292,8 +312,15 @@ func (s *Simulator) CalculateOptimalAngle(targetDistance, velocity float64) floa
 
 func (s *Simulator) RunSimulationWorker(jobCh <-chan *models.SimJob, resultCh chan<- *models.SimulationResult) {
 	for job := range jobCh {
+		s.Metrics.SetPendingSim(len(jobCh))
+		s.Metrics.IncActiveSim()
+		start := time.Now()
 		result := s.Simulate(job.Params)
 		result.DeviceID = job.DeviceID
+		s.Metrics.ObserveSimDuration(time.Since(start).Seconds())
+		s.Metrics.ObserveImpactVelocity(result.ImpactVelocity)
+		s.Metrics.IncSimulation()
+		s.Metrics.DecActiveSim()
 		resultCh <- result
 	}
 }
