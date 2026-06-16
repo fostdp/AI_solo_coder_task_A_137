@@ -10,19 +10,20 @@ import (
 
 	ch "ballistics-system/clickhouse"
 	"ballistics-system/models"
-	"ballistics-system/penetration"
-	"ballistics-system/simulation"
+
+	ballistic_simulator "ballistics-system/ballistic_simulator"
+	penetration_analyzer "ballistics-system/penetration_analyzer"
 )
 
 type Server struct {
 	engine      *gin.Engine
 	store       *ch.Store
-	simEngine   *simulation.Engine
-	penAnalyzer *penetration.Analyzer
+	simEngine   *ballistic_simulator.Simulator
+	penAnalyzer *penetration_analyzer.Analyzer
 	addr        string
 }
 
-func NewServer(addr string, store *ch.Store, simEngine *simulation.Engine, penAnalyzer *penetration.Analyzer) *Server {
+func NewServer(addr string, store *ch.Store, simEngine *ballistic_simulator.Simulator, penAnalyzer *penetration_analyzer.Analyzer) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
@@ -151,10 +152,10 @@ func (s *Server) simulate(c *gin.Context) {
 		result.ImpactVelocity,
 		params.ArrowMass,
 		params.ArrowDiameter,
-		1.0,
+		params.ArrowLength,
 		result.ImpactSpinRate,
-		penetration.ArmorType(armorType),
-		penetration.ArrowHeadType(arrowType),
+		armorType,
+		arrowType,
 		0,
 	)
 	result.ArmorType = armorType
@@ -163,8 +164,16 @@ func (s *Server) simulate(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	_ = s.store.InsertSimulationResult(ctx, result)
-	_ = s.store.InsertArmorPerformance(ctx, s.penAnalyzer.ToArmorPerformance(penResult))
+	if s.store != nil {
+		if err := s.store.InsertSimulationResult(ctx, result); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		if err := s.store.InsertArmorPerformance(ctx, s.penAnalyzer.ToArmorPerformance(penResult)); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+	}
 
 	c.JSON(200, gin.H{
 		"simulation":  result,
@@ -226,14 +235,16 @@ func (s *Server) analyzePenetration(c *gin.Context) {
 		req.ArrowDiameter,
 		req.ArrowLength,
 		req.SpinRate,
-		penetration.ArmorType(req.ArmorType),
-		penetration.ArrowHeadType(req.ArrowHeadType),
+		req.ArmorType,
+		req.ArrowHeadType,
 		req.ArmorThickness,
 	)
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	_ = s.store.InsertArmorPerformance(ctx, s.penAnalyzer.ToArmorPerformance(result))
+	if s.store != nil {
+		_ = s.store.InsertArmorPerformance(ctx, s.penAnalyzer.ToArmorPerformance(result))
+	}
 
 	c.JSON(200, result)
 }
@@ -273,26 +284,18 @@ func (s *Server) compareArmors(c *gin.Context) {
 		req.ArrowDiameter,
 		req.ArrowLength,
 		req.SpinRate,
-		penetration.ArrowHeadType(req.ArrowHeadType),
+		req.ArrowHeadType,
 	)
 	c.JSON(200, gin.H{"results": results})
 }
 
 func (s *Server) getArmorTypes(c *gin.Context) {
-	armors := []gin.H{
-		{"type": "leather", "name": "皮甲", "thickness_mm": 8, "density": 1000},
-		{"type": "chainmail", "name": "锁子甲", "thickness_mm": 6, "density": 7850},
-		{"type": "plate", "name": "板甲", "thickness_mm": 2.5, "density": 7850},
-	}
+	armors := s.penAnalyzer.ListArmorTypes()
 	c.JSON(200, gin.H{"armors": armors})
 }
 
 func (s *Server) getArrowHeadTypes(c *gin.Context) {
-	arrows := []gin.H{
-		{"type": "bodkin", "name": "穿甲箭镞", "tip_diameter_mm": 4, "hardness": 550},
-		{"type": "broadhead", "name": "宽刃箭镞", "tip_diameter_mm": 30, "hardness": 400},
-		{"type": "blunt", "name": "钝头箭镞", "tip_diameter_mm": 15, "hardness": 300},
-	}
+	arrows := s.penAnalyzer.ListArrowHeadTypes()
 	c.JSON(200, gin.H{"arrow_heads": arrows})
 }
 

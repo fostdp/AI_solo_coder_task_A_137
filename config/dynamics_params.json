@@ -1,0 +1,44 @@
+{
+  "bow": {
+    "arm_length": 1.5,
+    "arm_thickness": 0.05,
+    "arm_width": 0.08,
+    "arm_mass": 2.5,
+    "string_length": 3.2,
+    "string_mass": 0.05,
+    "string_young_mod": 3e9,
+    "string_cross_area": 5e-5,
+    "draw_length": 1.2,
+    "peak_tension": 5000.0,
+    "nonlinear_damping": 0.15,
+    "hysteresis_factor": 0.08,
+    "viscous_damping": 2.5,
+    "internal_damping": 0.02
+  },
+  "simulation": {
+    "time_step": 0.001,
+    "release_time_step": 5e-6,
+    "max_sim_time": 30.0,
+    "release_duration": 0.025,
+    "gravity": 9.80665,
+    "air_density_sea": 1.225,
+    "young_modulus_wood": 12e9,
+    "poisson_ratio_wood": 0.35
+  },
+  "defaults": {
+    "arrow_mass": 0.2,
+    "arrow_diameter": 0.012,
+    "arrow_length": 1.0,
+    "spin_rate": 25.0,
+    "drag_coefficient": 0.4,
+    "launch_angle": 45.0,
+    "azimuth_angle": 0.0
+  },
+  "aerodynamics": {
+    "lift_coefficient": 0.05,
+    "magnus_coefficient": 0.001,
+    "spin_decay_rate": 0.0001,
+    "pitch_damping_base": 0.02,
+    "aero_moment_coefficient": 0.01
+  }
+}

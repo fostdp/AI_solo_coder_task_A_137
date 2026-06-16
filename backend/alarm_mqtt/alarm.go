@@ -1,4 +1,4 @@
-package mqtt
+package alarm_mqtt
 
 import (
 	"encoding/json"
@@ -11,10 +11,61 @@ import (
 	"ballistics-system/models"
 )
 
+type AlarmService struct {
+	pusher        *AlertPusher
+	checker       *AlertChecker
+	deformationMax float64
+	minRange       float64
+}
+
+func NewAlarmService(broker, clientID, topic, username, password string, deformationMax, minRange float64) *AlarmService {
+	pusher := NewAlertPusher(broker, clientID, topic, username, password)
+	checker := NewAlertChecker(deformationMax, minRange)
+
+	return &AlarmService{
+		pusher:        pusher,
+		checker:       checker,
+		deformationMax: deformationMax,
+		minRange:       minRange,
+	}
+}
+
+func (s *AlarmService) CheckSensor(data *models.SensorData) []*models.Alert {
+	return s.checker.CheckSensor(data)
+}
+
+func (s *AlarmService) CheckRange(deviceID string, actualRange float64) *models.Alert {
+	return s.checker.CheckRange(deviceID, actualRange)
+}
+
+func (s *AlarmService) Push(alert *models.Alert) {
+	s.pusher.Push(alert)
+}
+
+func (s *AlarmService) PushAlerts(alerts []*models.Alert) {
+	for _, a := range alerts {
+		s.Push(a)
+	}
+}
+
+func (s *AlarmService) Stop() {
+	s.pusher.Stop()
+}
+
+func (s *AlarmService) RunAlertWorker(alertCh <-chan *models.Alert, storeFn func(*models.Alert)) {
+	for alert := range alertCh {
+		if storeFn != nil {
+			storeFn(alert)
+		}
+		s.Push(alert)
+		log.Printf("[alarm_mqtt] ALERT [%s] %s: %s", alert.AlertLevel, alert.AlertType, alert.Message)
+	}
+}
+
 type AlertPusher struct {
-	client   mqtt.Client
-	topic    string
-	broker   string
+	client    mqtt.Client
+	topic     string
+	broker    string
 	alertChan chan *models.Alert
 }
 
@@ -33,10 +84,10 @@ func NewAlertPusher(broker, clientID, topic, username, password string) *AlertPu
 	opts.SetCleanSession(true)
 
 	opts.OnConnect = func(c mqtt.Client) {
-		log.Println("MQTT connected to", broker)
+		log.Printf("[alarm_mqtt] Connected to %s", broker)
 	}
 	opts.OnConnectionLost = func(c mqtt.Client, err error) {
-		log.Printf("MQTT connection lost: %v", err)
+		log.Printf("[alarm_mqtt] Connection lost: %v", err)
 	}
 
 	pusher := &AlertPusher{
@@ -55,7 +106,7 @@ func NewAlertPusher(broker, clientID, topic, username, password string) *AlertPu
 func (p *AlertPusher) connectLoop() {
 	for {
 		if token := p.client.Connect(); token.Wait() && token.Error() != nil {
-			log.Printf("MQTT connect error: %v, retrying in 5s", token.Error())
+			log.Printf("[alarm_mqtt] Connect error: %v, retrying in 5s", token.Error())
 			time.Sleep(5 * time.Second)
 		} else {
 			break
@@ -71,13 +122,13 @@ func (p *AlertPusher) publishLoop() {
 
 func (p *AlertPusher) publishAlert(alert *models.Alert) {
 	if !p.client.IsConnected() {
-		log.Println("MQTT not connected, alert queued")
+		log.Println("[alarm_mqtt] Not connected, alert queued")
 		return
 	}
 
 	payload, err := json.Marshal(alert)
 	if err != nil {
-		log.Printf("Alert JSON marshal error: %v", err)
+		log.Printf("[alarm_mqtt] JSON marshal error: %v", err)
 		return
 	}
 
@@ -86,9 +137,9 @@ func (p *AlertPusher) publishAlert(alert *models.Alert) {
 	go func() {
 		token.Wait()
 		if token.Error() != nil {
-			log.Printf("MQTT publish error: %v", token.Error())
+			log.Printf("[alarm_mqtt] Publish error: %v", token.Error())
 		} else {
-			log.Printf("Alert published: %s - %s", alert.AlertType, alert.Message)
+			log.Printf("[alarm_mqtt] Published: %s - %s", alert.AlertType, alert.Message)
 		}
 	}()
 }
@@ -97,7 +148,7 @@ func (p *AlertPusher) Push(alert *models.Alert) {
 	select {
 	case p.alertChan <- alert:
 	default:
-		log.Println("Alert channel full, dropping alert")
+		log.Println("[alarm_mqtt] Alert channel full, dropping alert")
 	}
 }
 
@@ -114,11 +165,10 @@ type AlertChecker struct {
 	alertChan      chan<- *models.Alert
 }
 
-func NewAlertChecker(deformationMax, minRange float64, alertChan chan<- *models.Alert) *AlertChecker {
+func NewAlertChecker(deformationMax, minRange float64) *AlertChecker {
 	return &AlertChecker{
 		deformationMax: deformationMax,
 		minRange:       minRange,
-		alertChan:      alertChan,
 	}
 }
 
@@ -142,15 +192,6 @@ func (c *AlertChecker) CheckSensor(data *models.SensorData) []*models.Alert {
 		alerts = append(alerts, alert)
 	}
 
-	if alerts != nil {
-		for _, a := range alerts {
-			select {
-			case c.alertChan <- a:
-			default:
-			}
-		}
-	}
-
 	return alerts
 }
 
@@ -168,10 +209,6 @@ func (c *AlertChecker) CheckRange(deviceID string, actualRange float64) *models.
 			Message:     fmt.Sprintf("射程 %.2f m 低于最低要求 %.2f m", actualRange, c.minRange),
 			SensorValue: actualRange,
 			Threshold:   c.minRange,
-		}
-		select {
-		case c.alertChan <- alert:
-		default:
 		}
 		return alert
 	}

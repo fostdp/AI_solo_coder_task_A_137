@@ -48,20 +48,21 @@ func (s *Store) Close() error {
 
 func (s *Store) InsertSensorData(ctx context.Context, data *models.SensorData) error {
 	return s.conn.Exec(ctx, `
-		INSERT INTO sensor_data (device_id, timestamp, bowstring_tension, arm_deformation, arrow_initial_velocity, penetration_depth, temperature, humidity)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO sensor_data (device_id, timestamp, bowstring_tension, arm_deformation, arrow_initial_velocity, arrow_spin_rate, penetration_depth, temperature, humidity)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, data.DeviceID, data.Timestamp, data.BowstringTension, data.ArmDeformation,
-		data.ArrowInitialVelocity, data.PenetrationDepth, data.Temperature, data.Humidity)
+		data.ArrowInitialVelocity, data.ArrowSpinRate, data.PenetrationDepth, data.Temperature, data.Humidity)
 }
 
 func (s *Store) InsertSimulationResult(ctx context.Context, result *models.SimulationResult) error {
 	trajJSON, _ := json.Marshal(result.Trajectory)
 	return s.conn.Exec(ctx, `
-		INSERT INTO simulation_results (device_id, timestamp, initial_velocity, launch_angle, flight_time, max_height, range, impact_velocity, kinetic_energy, trajectory, armor_type, penetration_depth, penetration_success)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO simulation_results (device_id, timestamp, initial_velocity, launch_angle, flight_time, max_height, range, impact_velocity, kinetic_energy, impact_spin_rate, impact_gyro_stab, trajectory, armor_type, penetration_depth, penetration_success)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, result.DeviceID, result.Timestamp, result.InitialVelocity, result.LaunchAngle,
 		result.FlightTime, result.MaxHeight, result.Range, result.ImpactVelocity,
-		result.KineticEnergy, string(trajJSON), result.ArmorType, result.PenetrationDepth, result.PenetrationSuccess)
+		result.KineticEnergy, result.ImpactSpinRate, result.ImpactGyroStab,
+		string(trajJSON), result.ArmorType, result.PenetrationDepth, result.PenetrationSuccess)
 }
 
 func (s *Store) InsertAlert(ctx context.Context, alert *models.Alert) error {
@@ -74,15 +75,26 @@ func (s *Store) InsertAlert(ctx context.Context, alert *models.Alert) error {
 
 func (s *Store) InsertArmorPerformance(ctx context.Context, p *models.ArmorPerformance) error {
 	return s.conn.Exec(ctx, `
-		INSERT INTO armor_performance (timestamp, armor_type, armor_thickness, impact_velocity, arrow_mass, arrow_head_type, penetration_depth, residual_velocity, energy_absorbed)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO armor_performance (timestamp, armor_type, armor_thickness, impact_velocity, arrow_mass, arrow_diameter, arrow_length, spin_rate, gyro_stability, yaw_angle, effective_area, arrow_head_type, penetration_depth, residual_velocity, energy_absorbed)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, p.Timestamp, p.ArmorType, p.ArmorThickness, p.ImpactVelocity, p.ArrowMass,
-		p.ArrowHeadType, p.PenetrationDepth, p.ResidualVelocity, p.EnergyAbsorbed)
+		p.ArrowDiameter, p.ArrowLength, p.SpinRate, p.GyroStability,
+		p.YawAngle, p.EffectiveArea, p.ArrowHeadType,
+		p.PenetrationDepth, p.ResidualVelocity, p.EnergyAbsorbed)
+}
+
+func (s *Store) InsertBowReleaseEnergy(ctx context.Context, e *models.BowReleaseEnergy) error {
+	return s.conn.Exec(ctx, `
+		INSERT INTO bow_release_energy (device_id, timestamp, initial_potential_energy, arrow_ke, arm_ke, string_ke, hysteresis_loss, viscous_loss, internal_loss, nonlinear_loss, total_dissipated, efficiency, release_time, exit_velocity)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, e.DeviceID, e.Timestamp, e.InitialPotentialEnergy, e.ArrowKE, e.ArmKE,
+		e.StringKE, e.HysteresisLoss, e.ViscousLoss, e.InternalLoss,
+		e.NonlinearLoss, e.TotalDissipated, e.Efficiency, e.ReleaseTime, e.ExitVelocity)
 }
 
 func (s *Store) QuerySensorData(ctx context.Context, deviceID string, limit int) ([]models.SensorData, error) {
 	rows, err := s.conn.Query(ctx, `
-		SELECT device_id, timestamp, bowstring_tension, arm_deformation, arrow_initial_velocity, penetration_depth, temperature, humidity
+		SELECT device_id, timestamp, bowstring_tension, arm_deformation, arrow_initial_velocity, arrow_spin_rate, penetration_depth, temperature, humidity
 		FROM sensor_data
 		WHERE device_id = ?
 		ORDER BY timestamp DESC
@@ -97,7 +109,7 @@ func (s *Store) QuerySensorData(ctx context.Context, deviceID string, limit int)
 	for rows.Next() {
 		var d models.SensorData
 		if err := rows.Scan(&d.DeviceID, &d.Timestamp, &d.BowstringTension, &d.ArmDeformation,
-			&d.ArrowInitialVelocity, &d.PenetrationDepth, &d.Temperature, &d.Humidity); err != nil {
+			&d.ArrowInitialVelocity, &d.ArrowSpinRate, &d.PenetrationDepth, &d.Temperature, &d.Humidity); err != nil {
 			return nil, err
 		}
 		results = append(results, d)
@@ -107,7 +119,7 @@ func (s *Store) QuerySensorData(ctx context.Context, deviceID string, limit int)
 
 func (s *Store) QueryRecentSimulations(ctx context.Context, limit int) ([]models.SimulationResult, error) {
 	rows, err := s.conn.Query(ctx, `
-		SELECT device_id, timestamp, initial_velocity, launch_angle, flight_time, max_height, range, impact_velocity, kinetic_energy, trajectory, armor_type, penetration_depth, penetration_success
+		SELECT device_id, timestamp, initial_velocity, launch_angle, flight_time, max_height, range, impact_velocity, kinetic_energy, impact_spin_rate, impact_gyro_stab, trajectory, armor_type, penetration_depth, penetration_success
 		FROM simulation_results
 		ORDER BY timestamp DESC
 		LIMIT ?
@@ -123,6 +135,7 @@ func (s *Store) QueryRecentSimulations(ctx context.Context, limit int) ([]models
 		var trajStr string
 		if err := rows.Scan(&r.DeviceID, &r.Timestamp, &r.InitialVelocity, &r.LaunchAngle,
 			&r.FlightTime, &r.MaxHeight, &r.Range, &r.ImpactVelocity, &r.KineticEnergy,
+			&r.ImpactSpinRate, &r.ImpactGyroStab,
 			&trajStr, &r.ArmorType, &r.PenetrationDepth, &r.PenetrationSuccess); err != nil {
 			return nil, err
 		}
@@ -163,7 +176,7 @@ func (s *Store) QueryAlerts(ctx context.Context, acknowledged *bool, limit int) 
 
 func (s *Store) QueryArmorPerformance(ctx context.Context, armorType string, limit int) ([]models.ArmorPerformance, error) {
 	rows, err := s.conn.Query(ctx, `
-		SELECT timestamp, armor_type, armor_thickness, impact_velocity, arrow_mass, arrow_head_type, penetration_depth, residual_velocity, energy_absorbed
+		SELECT timestamp, armor_type, armor_thickness, impact_velocity, arrow_mass, arrow_diameter, arrow_length, spin_rate, gyro_stability, yaw_angle, effective_area, arrow_head_type, penetration_depth, residual_velocity, energy_absorbed
 		FROM armor_performance
 		WHERE armor_type = ?
 		ORDER BY timestamp DESC
@@ -178,7 +191,9 @@ func (s *Store) QueryArmorPerformance(ctx context.Context, armorType string, lim
 	for rows.Next() {
 		var p models.ArmorPerformance
 		if err := rows.Scan(&p.Timestamp, &p.ArmorType, &p.ArmorThickness, &p.ImpactVelocity,
-			&p.ArrowMass, &p.ArrowHeadType, &p.PenetrationDepth, &p.ResidualVelocity, &p.EnergyAbsorbed); err != nil {
+			&p.ArrowMass, &p.ArrowDiameter, &p.ArrowLength, &p.SpinRate,
+			&p.GyroStability, &p.YawAngle, &p.EffectiveArea,
+			&p.ArrowHeadType, &p.PenetrationDepth, &p.ResidualVelocity, &p.EnergyAbsorbed); err != nil {
 			return nil, err
 		}
 		results = append(results, p)

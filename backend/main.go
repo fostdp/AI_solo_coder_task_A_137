@@ -2,24 +2,31 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	ch "ballistics-system/clickhouse"
 	"ballistics-system/config"
 	"ballistics-system/models"
-	"ballistics-system/mqtt"
-	"ballistics-system/penetration"
-	"ballistics-system/simulation"
-	"ballistics-system/udp"
+
+	alarm_mqtt "ballistics-system/alarm_mqtt"
+	ballistic_simulator "ballistics-system/ballistic_simulator"
+	penetration_analyzer "ballistics-system/penetration_analyzer"
+	udp_receiver "ballistics-system/udp_receiver"
+
 	"ballistics-system/api"
 )
 
 func main() {
 	cfg := config.Load()
+
+	dynCfg := config.LoadDynamics(cfg.DynamicsPath)
+	armorCfg := config.LoadArmor(cfg.ArmorPath)
 
 	store, err := ch.NewStore(cfg.ClickHouseDSN)
 	if err != nil {
@@ -30,28 +37,55 @@ func main() {
 		defer store.Close()
 	}
 
-	simEngine := simulation.NewEngine()
-	penAnalyzer := penetration.NewAnalyzer()
-
-	sensorDataChan := make(chan *models.SensorData, 1000)
-	alertChan := make(chan *models.Alert, 100)
-
-	alertPusher := mqtt.NewAlertPusher(
+	simEngine := ballistic_simulator.NewSimulator(dynCfg)
+	penAnalyzer := penetration_analyzer.NewAnalyzer(armorCfg)
+	alarmService := alarm_mqtt.NewAlarmService(
 		cfg.MQTTBroker, cfg.MQTTClientID, cfg.MQTTTopic,
 		cfg.MQTTUsername, cfg.MQTTPassword,
+		cfg.DeformationMax, cfg.MinRange,
 	)
-	defer alertPusher.Stop()
+	defer alarmService.Stop()
 
-	alertChecker := mqtt.NewAlertChecker(cfg.DeformationMax, cfg.MinRange, alertChan)
+	sensorDataCh := make(chan *models.ValidatedSensorData, 1000)
+	simJobCh := make(chan *models.SimJob, 100)
+	simResultCh := make(chan *models.SimulationResult, 100)
+	penJobCh := make(chan *models.PenJob, 100)
+	penResultCh := make(chan *models.PenetrationResult, 100)
+	alertCh := make(chan *models.Alert, 100)
 
-	udpReceiver := udp.NewReceiver(cfg.UDPPort, sensorDataChan)
+	udpReceiver := udp_receiver.NewReceiver(cfg.UDPPort, sensorDataCh)
 	if err := udpReceiver.Start(); err != nil {
 		log.Fatalf("Failed to start UDP receiver: %v", err)
 	}
 	defer udpReceiver.Stop()
 
-	go processSensorData(sensorDataChan, store, simEngine, penAnalyzer, alertChecker, alertPusher)
-	go processAlerts(alertChan, store, alertPusher)
+	go simEngine.RunSimulationWorker(simJobCh, simResultCh)
+	go penAnalyzer.RunPenetrationWorker(penJobCh, penResultCh)
+	go alarmService.RunAlertWorker(alertCh, func(alert *models.Alert) {
+		if store != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := store.InsertAlert(ctx, alert); err != nil {
+				log.Printf("Insert alert error: %v", err)
+			}
+		}
+	})
+
+	orch := &pipelineOrchestrator{
+		store:        store,
+		simEngine:    simEngine,
+		penAnalyzer:  penAnalyzer,
+		alarmService: alarmService,
+		dynCfg:       dynCfg,
+		deformMax:    cfg.DeformationMax,
+		minRange:     cfg.MinRange,
+		pending:      make(map[string]chan *models.SimulationResult),
+		mu:           &sync.Mutex{},
+	}
+
+	go orch.routeSimResults(simResultCh)
+	go orch.routePenResults(penResultCh)
+	go orch.processSensorData(sensorDataCh, simJobCh, penJobCh, alertCh)
 
 	httpServer := api.NewServer(cfg.HTTPAddr, store, simEngine, penAnalyzer)
 	go func() {
@@ -65,6 +99,8 @@ func main() {
 	log.Printf("  UDP port: %d", cfg.UDPPort)
 	log.Printf("  HTTP addr: %s", cfg.HTTPAddr)
 	log.Printf("  MQTT broker: %s", cfg.MQTTBroker)
+	log.Printf("  Dynamics config: %s", cfg.DynamicsPath)
+	log.Printf("  Armor config: %s", cfg.ArmorPath)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -75,78 +111,182 @@ func main() {
 	log.Println("Ballistics System stopped")
 }
 
-func processSensorData(
-	dataChan <-chan *models.SensorData,
-	store *ch.Store,
-	simEngine *simulation.Engine,
-	penAnalyzer *penetration.Analyzer,
-	alertChecker *mqtt.AlertChecker,
-	alertPusher *mqtt.AlertPusher,
-) {
-	for data := range dataChan {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+type pipelineOrchestrator struct {
+	store        *ch.Store
+	simEngine    *ballistic_simulator.Simulator
+	penAnalyzer  *penetration_analyzer.Analyzer
+	alarmService *alarm_mqtt.AlarmService
+	dynCfg       *config.DynamicsConfig
+	deformMax    float64
+	minRange     float64
+	pending      map[string]chan *models.SimulationResult
+	mu           *sync.Mutex
+}
 
-		if store != nil {
-			if err := store.InsertSensorData(ctx, data); err != nil {
+func (o *pipelineOrchestrator) registerPending(deviceID string, ch chan *models.SimulationResult) {
+	o.mu.Lock()
+	o.pending[deviceID] = ch
+	o.mu.Unlock()
+}
+
+func (o *pipelineOrchestrator) unregisterPending(deviceID string) {
+	o.mu.Lock()
+	delete(o.pending, deviceID)
+	o.mu.Unlock()
+}
+
+func (o *pipelineOrchestrator) routeSimResults(simResultCh <-chan *models.SimulationResult) {
+	for result := range simResultCh {
+		o.mu.Lock()
+		ch, ok := o.pending[result.DeviceID]
+		o.mu.Unlock()
+
+		if ok {
+			ch <- result
+		} else {
+			log.Printf("[orchestrator] SimResult for unknown device %s", result.DeviceID)
+			if o.store != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = o.store.InsertSimulationResult(ctx, result)
+				cancel()
+			}
+		}
+	}
+}
+
+func (o *pipelineOrchestrator) routePenResults(penResultCh <-chan *models.PenetrationResult) {
+	for penResult := range penResultCh {
+		if o.store != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := o.store.InsertArmorPerformance(ctx, o.penAnalyzer.ToArmorPerformance(penResult)); err != nil {
+				log.Printf("Insert armor performance error: %v", err)
+			}
+			cancel()
+		}
+	}
+}
+
+func (o *pipelineOrchestrator) processSensorData(
+	sensorCh <-chan *models.ValidatedSensorData,
+	simJobCh chan<- *models.SimJob,
+	penJobCh chan<- *models.PenJob,
+	alertCh chan<- *models.Alert,
+) {
+	for validated := range sensorCh {
+		data := validated.Data
+
+		if o.store != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := o.store.InsertSensorData(ctx, data); err != nil {
 				log.Printf("Insert sensor data error: %v", err)
 			}
+			cancel()
 		}
 
-		alertChecker.CheckSensor(data)
+		alerts := o.alarmService.CheckSensor(data)
+		for _, a := range alerts {
+			alertCh <- a
+		}
 
 		if data.ArrowInitialVelocity > 0 {
-			simParams := &models.SimulationParams{
-				InitialVelocity: data.ArrowInitialVelocity,
-				LaunchAngle:     45.0,
-				AzimuthAngle:    0.0,
-				ArrowMass:       0.2,
-				ArrowDiameter:   0.012,
-				DragCoefficient: 0.4,
-				AirDensity:      1.225,
-				SpinRate:        25.0,
-			}
-			simResult := simEngine.Simulate(simParams)
-			simResult.DeviceID = data.DeviceID
+			simParams := o.buildSimParams(data)
 
-			alertChecker.CheckRange(data.DeviceID, simResult.Range)
+			resultCh := make(chan *models.SimulationResult, 1)
+			o.registerPending(data.DeviceID, resultCh)
 
-			penResult := penAnalyzer.AnalyzeWithSpin(
-				simResult.ImpactVelocity,
-				0.2,
-				0.012,
-				1.0,
-				simResult.ImpactSpinRate,
-				penetration.PlateArmor,
-				penetration.BodkinPoint,
-				0,
-			)
-			simResult.ArmorType = "plate"
-			simResult.PenetrationDepth = penResult.PenetrationDepth
-			simResult.PenetrationSuccess = penResult.Success
-
-			if store != nil {
-				_ = store.InsertSimulationResult(ctx, simResult)
-				_ = store.InsertArmorPerformance(ctx, penAnalyzer.ToArmorPerformance(penResult))
+			simJobCh <- &models.SimJob{
+				Params:   simParams,
+				DeviceID: data.DeviceID,
 			}
 
-			log.Printf("[%s] v0=%.1fm/s range=%.1fm impact_v=%.1fm/s KE=%.1fJ pen=%.2fmm success=%v",
-				data.DeviceID, data.ArrowInitialVelocity, simResult.Range,
-				simResult.ImpactVelocity, simResult.KineticEnergy,
-				simResult.PenetrationDepth*1000, simResult.PenetrationSuccess)
+			go o.awaitSimResult(data.DeviceID, resultCh, simParams, penJobCh, alertCh)
 		}
-
-		cancel()
 	}
 }
 
-func processAlerts(alertChan <-chan *models.Alert, store *ch.Store, pusher *mqtt.AlertPusher) {
-	for alert := range alertChan {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if store != nil {
-			_ = store.InsertAlert(ctx, alert)
-		}
-		pusher.Push(alert)
-		log.Printf("ALERT [%s] %s: %s", alert.AlertLevel, alert.AlertType, alert.Message)
-		cancel()
+func (o *pipelineOrchestrator) buildSimParams(data *models.SensorData) *models.SimulationParams {
+	spinRate := o.dynCfg.Defaults.SpinRate
+	if data.ArrowSpinRate > 0 {
+		spinRate = data.ArrowSpinRate
+	}
+	return &models.SimulationParams{
+		InitialVelocity: data.ArrowInitialVelocity,
+		LaunchAngle:     o.dynCfg.Defaults.LaunchAngle,
+		AzimuthAngle:    o.dynCfg.Defaults.AzimuthAngle,
+		ArrowMass:       o.dynCfg.Defaults.ArrowMass,
+		ArrowDiameter:   o.dynCfg.Defaults.ArrowDiameter,
+		ArrowLength:     o.dynCfg.Defaults.ArrowLength,
+		DragCoefficient: o.dynCfg.Defaults.DragCoefficient,
+		AirDensity:      o.dynCfg.Simulation.AirDensitySea,
+		SpinRate:        spinRate,
 	}
 }
+
+func (o *pipelineOrchestrator) awaitSimResult(
+	deviceID string,
+	resultCh <-chan *models.SimulationResult,
+	simParams *models.SimulationParams,
+	penJobCh chan<- *models.PenJob,
+	alertCh chan<- *models.Alert,
+) {
+	defer o.unregisterPending(deviceID)
+
+	select {
+	case simResult := <-resultCh:
+		rangeAlert := o.alarmService.CheckRange(deviceID, simResult.Range)
+		if rangeAlert != nil {
+			alertCh <- rangeAlert
+		}
+
+		penJobCh <- &models.PenJob{
+			ImpactVelocity: simResult.ImpactVelocity,
+			ArrowMass:      simParams.ArrowMass,
+			ArrowDiameter:  simParams.ArrowDiameter,
+			ArrowLength:    simParams.ArrowLength,
+			SpinRate:       simResult.ImpactSpinRate,
+			ArmorType:      "plate",
+			ArrowHeadType:  "bodkin",
+			ArmorThickness: 0,
+			DeviceID:       deviceID,
+		}
+
+		exitVel, energyBudget := o.simEngine.SimulateFullRelease(simParams.ArrowMass)
+		if o.store != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := o.store.InsertSimulationResult(ctx, simResult); err != nil {
+				log.Printf("Insert simulation result error: %v", err)
+			}
+			if energyBudget != nil {
+				if err := o.store.InsertBowReleaseEnergy(ctx, &models.BowReleaseEnergy{
+					DeviceID:               deviceID,
+					Timestamp:              time.Now(),
+					InitialPotentialEnergy: energyBudget["initial_potential"],
+					ArrowKE:                energyBudget["arrow_ke"],
+					ArmKE:                  energyBudget["arm_ke"],
+					StringKE:               0,
+					HysteresisLoss:         energyBudget["hysteresis_loss"],
+					ViscousLoss:            energyBudget["viscous_loss"],
+					InternalLoss:           energyBudget["internal_loss"],
+					NonlinearLoss:          energyBudget["nonlinear_loss"],
+					TotalDissipated:        energyBudget["dissipated"],
+					Efficiency:             energyBudget["efficiency"],
+					ReleaseTime:            energyBudget["release_time"],
+					ExitVelocity:           exitVel,
+				}); err != nil {
+					log.Printf("Insert bow release energy error: %v", err)
+				}
+			}
+			cancel()
+		}
+
+		log.Printf("[orchestrator] [%s] v0=%.1fm/s range=%.1fm impact_v=%.1fm/s KE=%.1fJ efficiency=%.1f%%",
+			deviceID, simParams.InitialVelocity, simResult.Range,
+			simResult.ImpactVelocity, simResult.KineticEnergy,
+			energyBudget["efficiency"]*100)
+
+	case <-time.After(10 * time.Second):
+		log.Printf("[orchestrator] Timeout waiting for sim result for %s", deviceID)
+	}
+}
+
+var _ = fmt.Sprintf
