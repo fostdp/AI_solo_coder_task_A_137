@@ -103,15 +103,19 @@ func processSensorData(
 				ArrowDiameter:   0.012,
 				DragCoefficient: 0.4,
 				AirDensity:      1.225,
+				SpinRate:        25.0,
 			}
 			simResult := simEngine.Simulate(simParams)
 			simResult.DeviceID = data.DeviceID
 
 			alertChecker.CheckRange(data.DeviceID, simResult.Range)
 
-			penResult := penAnalyzer.Analyze(
+			penResult := penAnalyzer.AnalyzeWithSpin(
 				simResult.ImpactVelocity,
 				0.2,
+				0.012,
+				1.0,
+				simResult.ImpactSpinRate,
 				penetration.PlateArmor,
 				penetration.BodkinPoint,
 				0,

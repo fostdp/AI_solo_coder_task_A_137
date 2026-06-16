@@ -25,6 +25,7 @@ class BallisticsSimulator:
         self.base_deformation = 8.0
         self.base_velocity = 120.0
         self.base_penetration = 0.002
+        self.base_spin = 25.0
 
         self.shot_count = 0
 
@@ -37,6 +38,7 @@ class BallisticsSimulator:
         deformation = self.base_deformation + abs(random.gauss(0, 1.5)) * wear_factor
         velocity = self.base_velocity + random.gauss(0, 8)
         penetration = self.base_penetration * (velocity / self.base_velocity) ** 2 + random.gauss(0, 0.0003)
+        spin_rate = self.base_spin + random.gauss(0, 2.5)
 
         if self.shot_count % 50 == 0:
             deformation += random.uniform(5, 12)
@@ -58,6 +60,7 @@ class BallisticsSimulator:
             "bowstring_tension": round(tension, 2),
             "arm_deformation": round(deformation, 3),
             "arrow_initial_velocity": round(velocity, 2),
+            "arrow_spin_rate": round(spin_rate, 2),
             "penetration_depth": round(penetration, 6),
             "temperature": round(20.0 + random.gauss(0, 3), 1),
             "humidity": round(50.0 + random.gauss(0, 10), 1)

@@ -14,14 +14,17 @@ type SensorData struct {
 }
 
 type TrajectoryPoint struct {
-	Time     float64 `json:"t"`
-	X        float64 `json:"x"`
-	Y        float64 `json:"y"`
-	Z        float64 `json:"z"`
-	Vx       float64 `json:"vx"`
-	Vy       float64 `json:"vy"`
-	Vz       float64 `json:"vz"`
-	Velocity float64 `json:"v"`
+	Time           float64 `json:"t"`
+	X              float64 `json:"x"`
+	Y              float64 `json:"y"`
+	Z              float64 `json:"z"`
+	Vx             float64 `json:"vx"`
+	Vy             float64 `json:"vy"`
+	Vz             float64 `json:"vz"`
+	Velocity       float64 `json:"v"`
+	SpinRate       float64 `json:"spin_rate"`
+	GyroStability  float64 `json:"gyro_stab"`
+	AttitudeStable bool    `json:"stable"`
 }
 
 type SimulationParams struct {
@@ -32,6 +35,7 @@ type SimulationParams struct {
 	ArrowDiameter   float64 `json:"arrow_diameter"`
 	DragCoefficient float64 `json:"drag_coefficient"`
 	AirDensity      float64 `json:"air_density"`
+	SpinRate        float64 `json:"spin_rate"`
 }
 
 type SimulationResult struct {
@@ -44,6 +48,8 @@ type SimulationResult struct {
 	Range              float64           `json:"range"`
 	ImpactVelocity     float64           `json:"impact_velocity"`
 	KineticEnergy      float64           `json:"kinetic_energy"`
+	ImpactSpinRate     float64           `json:"impact_spin"`
+	ImpactGyroStab     float64           `json:"impact_gyro"`
 	Trajectory         []TrajectoryPoint `json:"trajectory"`
 	ArmorType          string            `json:"armor_type"`
 	PenetrationDepth   float64           `json:"penetration_depth"`
@@ -59,15 +65,20 @@ type ArmorParams struct {
 }
 
 type PenetrationResult struct {
-	ArmorType        string  `json:"armor_type"`
-	ArmorThickness   float64 `json:"armor_thickness"`
-	ImpactVelocity   float64 `json:"impact_velocity"`
-	ArrowMass        float64 `json:"arrow_mass"`
-	ArrowHeadType    string  `json:"arrow_head_type"`
-	PenetrationDepth float64 `json:"penetration_depth"`
-	ResidualVelocity float64 `json:"residual_velocity"`
-	EnergyAbsorbed   float64 `json:"energy_absorbed"`
-	Success          bool    `json:"success"`
+	ArmorType         string  `json:"armor_type"`
+	ArmorThickness    float64 `json:"armor_thickness"`
+	ImpactVelocity    float64 `json:"impact_velocity"`
+	ArrowMass         float64 `json:"arrow_mass"`
+	ArrowHeadType     string  `json:"arrow_head_type"`
+	PenetrationDepth  float64 `json:"penetration_depth"`
+	ResidualVelocity  float64 `json:"residual_velocity"`
+	EnergyAbsorbed    float64 `json:"energy_absorbed"`
+	Success           bool    `json:"success"`
+	ImpactSpinRate    float64 `json:"impact_spin"`
+	GyroStability     float64 `json:"gyro_stab"`
+	YawAngle          float64 `json:"yaw_angle"`
+	EffectiveArea     float64 `json:"effective_area"`
+	StabilityFactor   float64 `json:"stab_factor"`
 }
 
 type Alert struct {

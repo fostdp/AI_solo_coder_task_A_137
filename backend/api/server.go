@@ -147,9 +147,12 @@ func (s *Server) simulate(c *gin.Context) {
 		arrowType = "bodkin"
 	}
 
-	penResult := s.penAnalyzer.Analyze(
+	penResult := s.penAnalyzer.AnalyzeWithSpin(
 		result.ImpactVelocity,
 		params.ArrowMass,
+		params.ArrowDiameter,
+		1.0,
+		result.ImpactSpinRate,
 		penetration.ArmorType(armorType),
 		penetration.ArrowHeadType(arrowType),
 		0,
@@ -190,6 +193,9 @@ func (s *Server) analyzePenetration(c *gin.Context) {
 	var req struct {
 		ImpactVelocity float64 `json:"impact_velocity" binding:"required"`
 		ArrowMass      float64 `json:"arrow_mass"`
+		ArrowDiameter  float64 `json:"arrow_diameter"`
+		ArrowLength    float64 `json:"arrow_length"`
+		SpinRate       float64 `json:"spin_rate"`
 		ArmorType      string  `json:"armor_type" binding:"required"`
 		ArrowHeadType  string  `json:"arrow_head_type"`
 		ArmorThickness float64 `json:"armor_thickness"`
@@ -201,13 +207,25 @@ func (s *Server) analyzePenetration(c *gin.Context) {
 	if req.ArrowMass == 0 {
 		req.ArrowMass = 0.2
 	}
+	if req.ArrowDiameter == 0 {
+		req.ArrowDiameter = 0.012
+	}
+	if req.ArrowLength == 0 {
+		req.ArrowLength = 1.0
+	}
+	if req.SpinRate == 0 {
+		req.SpinRate = 25.0
+	}
 	if req.ArrowHeadType == "" {
 		req.ArrowHeadType = "bodkin"
 	}
 
-	result := s.penAnalyzer.Analyze(
+	result := s.penAnalyzer.AnalyzeWithSpin(
 		req.ImpactVelocity,
 		req.ArrowMass,
+		req.ArrowDiameter,
+		req.ArrowLength,
+		req.SpinRate,
 		penetration.ArmorType(req.ArmorType),
 		penetration.ArrowHeadType(req.ArrowHeadType),
 		req.ArmorThickness,
@@ -224,6 +242,9 @@ func (s *Server) compareArmors(c *gin.Context) {
 	var req struct {
 		ImpactVelocity float64 `json:"impact_velocity" binding:"required"`
 		ArrowMass      float64 `json:"arrow_mass"`
+		ArrowDiameter  float64 `json:"arrow_diameter"`
+		ArrowLength    float64 `json:"arrow_length"`
+		SpinRate       float64 `json:"spin_rate"`
 		ArrowHeadType  string  `json:"arrow_head_type"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -233,13 +254,25 @@ func (s *Server) compareArmors(c *gin.Context) {
 	if req.ArrowMass == 0 {
 		req.ArrowMass = 0.2
 	}
+	if req.ArrowDiameter == 0 {
+		req.ArrowDiameter = 0.012
+	}
+	if req.ArrowLength == 0 {
+		req.ArrowLength = 1.0
+	}
+	if req.SpinRate == 0 {
+		req.SpinRate = 25.0
+	}
 	if req.ArrowHeadType == "" {
 		req.ArrowHeadType = "bodkin"
 	}
 
-	results := s.penAnalyzer.CompareArmors(
+	results := s.penAnalyzer.CompareArmorsWithSpin(
 		req.ImpactVelocity,
 		req.ArrowMass,
+		req.ArrowDiameter,
+		req.ArrowLength,
+		req.SpinRate,
 		penetration.ArrowHeadType(req.ArrowHeadType),
 	)
 	c.JSON(200, gin.H{"results": results})

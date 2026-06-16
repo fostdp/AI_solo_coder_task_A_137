@@ -10,12 +10,83 @@ let trajectoryLine = null;
 let trajectoryPoints = [];
 let isAnimating = false;
 let isShooting = false;
+let stringUniforms = [];
 
 const GRAVITY = 9.80665;
 const AIR_DENSITY = 1.225;
 const DRAG_COEFFICIENT = 0.4;
 const ARROW_MASS = 0.2;
 const ARROW_DIAMETER = 0.012;
+
+const BOWSTRING_VERTEX_SHADER = `
+    uniform vec3 u_anchor;
+    uniform vec3 u_tip;
+    uniform vec3 u_pullPoint;
+    uniform float u_sagFactor;
+    attribute float a_segment;
+    varying float v_segment;
+
+    vec3 quadraticBezier(vec3 p0, vec3 p1, vec3 p2, float t) {
+        float mt = 1.0 - t;
+        return mt * mt * p0 + 2.0 * mt * t * p1 + t * t * p2;
+    }
+
+    void main() {
+        v_segment = a_segment;
+        vec3 sagOffset = vec3(0.0, -u_sagFactor * sin(a_segment * 3.14159), 0.0);
+        vec3 controlPoint = (u_anchor + u_tip) * 0.5 + sagOffset * 0.3;
+        vec3 pos;
+        if (a_segment < 0.5) {
+            float t = a_segment * 2.0;
+            pos = quadraticBezier(u_tip, controlPoint, u_pullPoint, t);
+        } else {
+            float t = (a_segment - 0.5) * 2.0;
+            pos = quadraticBezier(u_pullPoint, controlPoint, vec3(u_tip.x, u_tip.y, -u_tip.z), t);
+        }
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+`;
+
+const BOWSTRING_FRAGMENT_SHADER = `
+    uniform vec3 u_color;
+    varying float v_segment;
+    void main() {
+        float alpha = 0.9 + 0.1 * sin(v_segment * 20.0);
+        gl_FragColor = vec4(u_color, alpha);
+    }
+`;
+
+function createBowStringGeometry(segments) {
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array((segments + 1) * 3);
+    const segmentsAttr = new Float32Array(segments + 1);
+    for (let i = 0; i <= segments; i++) {
+        segmentsAttr[i] = i / segments;
+    }
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('a_segment', new THREE.BufferAttribute(segmentsAttr, 1));
+    return geometry;
+}
+
+function createGPUString(tip, anchor) {
+    const geometry = createBowStringGeometry(120);
+    const uniforms = {
+        u_anchor: { value: new THREE.Vector3().copy(anchor) },
+        u_tip: { value: new THREE.Vector3().copy(tip) },
+        u_pullPoint: { value: new THREE.Vector3().copy(anchor) },
+        u_sagFactor: { value: 0.01 },
+        u_color: { value: new THREE.Color(0xd4a574) }
+    };
+    const material = new THREE.ShaderMaterial({
+        uniforms: uniforms,
+        vertexShader: BOWSTRING_VERTEX_SHADER,
+        fragmentShader: BOWSTRING_FRAGMENT_SHADER,
+        transparent: true
+    });
+    const line = new THREE.Line(geometry, material);
+    line.frustumCulled = false;
+    return { line, uniforms };
+}
 
 function initThree() {
     const canvas = document.getElementById('three-canvas');
@@ -102,7 +173,6 @@ function createBedCrossbow() {
         roughness: 0.4,
         metalness: 0.8
     });
-    const stringMat = new THREE.LineBasicMaterial({ color: 0xd4a574, linewidth: 2 });
 
     const baseGeo = new THREE.BoxGeometry(4, 0.3, 1.2);
     const base = new THREE.Mesh(baseGeo, woodMat);
@@ -153,9 +223,14 @@ function createBedCrossbow() {
     bowFrame.castShadow = true;
     bedCrossbow.add(bowFrame);
 
-    createBowArm(-1.2, 1.1, 0.6, -0.4, woodMat, stringMat);
-    createBowArm(-1.2, 1.1, -0.6, -0.4, woodMat, stringMat);
-    createBowArm(0.5, 1.1, 0, 0.3, woodMat, stringMat);
+    const bowConfigs = [
+        { x: -1.2, y: 1.1, z: 0.6, angle: -0.4 },
+        { x: -1.2, y: 1.1, z: -0.6, angle: -0.4 },
+        { x: 0.5, y: 1.1, z: 0, angle: 0.3 }
+    ];
+    bowConfigs.forEach(cfg => {
+        createBowArm(cfg.x, cfg.y, cfg.z, cfg.angle, woodMat);
+    });
 
     const triggerGeo = new THREE.BoxGeometry(0.2, 0.2, 0.1);
     const trigger = new THREE.Mesh(triggerGeo, metalMat);
@@ -182,7 +257,7 @@ function createBedCrossbow() {
     scene.add(bedCrossbow);
 }
 
-function createBowArm(x, y, z, angle, woodMat, stringMat) {
+function createBowArm(x, y, z, angle, woodMat) {
     const armGroup = new THREE.Group();
     armGroup.position.set(x, y, z);
 
@@ -200,19 +275,29 @@ function createBowArm(x, y, z, angle, woodMat, stringMat) {
     armGroup.add(tip);
 
     armGroup.userData.baseAngle = angle;
+    armGroup.userData.tipOffset = new THREE.Vector3(1.8, 0, 0);
     armGroup.rotation.y = angle;
     armGroup.rotation.z = 0;
 
     bedCrossbow.add(armGroup);
     bowArms.push(armGroup);
 
-    const stringPoints = [];
-    stringPoints.push(new THREE.Vector3(x + 1.8 * Math.cos(angle), y + 1.8 * Math.sin(0), z));
-    stringPoints.push(new THREE.Vector3(x + 0.5, y, z));
-    const stringGeo = new THREE.BufferGeometry().setFromPoints(stringPoints);
-    const stringLine = new THREE.Line(stringGeo, stringMat);
-    bedCrossbow.add(stringLine);
-    bowStrings.push({ line: stringLine, armIndex: bowArms.length - 1, anchor: new THREE.Vector3(x + 0.5, y, z), tip: new THREE.Vector3(x + 1.8 * Math.cos(angle), y, z) });
+    const anchorWorld = new THREE.Vector3(x + 0.5, y, z);
+    const tipWorld = new THREE.Vector3();
+    tipWorld.setFromMatrixPosition(tip.matrixWorld);
+    armGroup.updateMatrixWorld(true);
+    tipWorld.copy(armGroup.userData.tipOffset).applyMatrix4(armGroup.matrixWorld);
+
+    const gpuString = createGPUString(tipWorld, anchorWorld);
+    bedCrossbow.add(gpuString.line);
+    bowStrings.push({
+        ...gpuString,
+        armGroup: armGroup,
+        anchor: new THREE.Vector3(x + 0.5, y, z),
+        baseTipZ: z,
+        baseTipX: x
+    });
+    stringUniforms.push(gpuString.uniforms);
 }
 
 function createArrow() {
@@ -250,43 +335,19 @@ function createArrow() {
     bedCrossbow.add(arrowGroup);
 }
 
-function drawBowString(stringData, drawBack) {
-    const positions = [];
-    const tip = stringData.tip;
-    const anchor = stringData.anchor;
-
-    const pullPoint = new THREE.Vector3(
-        anchor.x - drawBack,
-        anchor.y,
-        anchor.z
-    );
-
-    positions.push(tip.x, tip.y, tip.z);
-    positions.push(pullPoint.x, pullPoint.y, pullPoint.z);
-    positions.push(tip.x, tip.y, -tip.z);
-
-    stringData.line.geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    stringData.line.geometry.attributes.position.needsUpdate = true;
-}
-
-function drawFullBowString(drawBack) {
+function updateGPUStringDraw(drawBack) {
+    const minX = -0.5;
     bowStrings.forEach((sd, idx) => {
-        const positions = [];
-        const tip = sd.tip;
-        const anchor = sd.anchor;
-        const pullX = Math.min(anchor.x - drawBack, -0.5);
-        const pullPoint = new THREE.Vector3(pullX, anchor.y, anchor.z);
+        const pullX = Math.max(minX, sd.anchor.x - drawBack);
+        sd.uniforms.u_pullPoint.value.set(pullX, sd.anchor.y, sd.anchor.z);
+        sd.uniforms.u_sagFactor.value = 0.01 + drawBack * 0.015;
+        sd.uniforms.u_anchor.value.copy(sd.anchor);
 
-        if (idx < 2) {
-            positions.push(tip.x, tip.y, tip.z);
-            positions.push(pullPoint.x, pullPoint.y, pullPoint.z);
-        } else {
-            positions.push(pullPoint.x, pullPoint.y, pullPoint.z);
-            positions.push(tip.x, tip.y, tip.z);
+        if (sd.armGroup) {
+            const tip = new THREE.Vector3().copy(sd.armGroup.userData.tipOffset);
+            tip.applyMatrix4(sd.armGroup.matrixWorld);
+            sd.uniforms.u_tip.value.copy(tip);
         }
-
-        sd.line.geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-        sd.line.geometry.attributes.position.needsUpdate = true;
     });
 }
 
@@ -432,7 +493,6 @@ function animateShot(v0, angleDeg) {
     const result = simulateTrajectoryLocally(v0, angleDeg);
     showTrajectory3D(result.points);
 
-    let phase = 0;
     const drawDuration = 800;
     const releaseDuration = 100;
 
@@ -443,11 +503,10 @@ function animateShot(v0, angleDeg) {
         if (elapsed < drawDuration) {
             const t = elapsed / drawDuration;
             const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-            const drawBack = ease * 1.2;
-            drawFullBowString(drawBack);
+            updateGPUStringDraw(ease * 1.2);
 
             if (arrowMesh) {
-                arrowMesh.position.x = -1.0 - drawBack * 0.5;
+                arrowMesh.position.x = -1.0 - ease * 1.2 * 0.5;
             }
             requestAnimationFrame(drawPhase);
         } else {
@@ -462,11 +521,10 @@ function animateShot(v0, angleDeg) {
             const elapsed = performance.now() - releaseStart;
             if (elapsed < releaseDuration) {
                 const e = elapsed / releaseDuration;
-                const drawBack = 1.2 * (1 - e);
-                drawFullBowString(drawBack);
+                updateGPUStringDraw(1.2 * (1 - e));
                 requestAnimationFrame(releaseAnim);
             } else {
-                drawFullBowString(0);
+                updateGPUStringDraw(0);
                 flyPhase();
             }
         }
@@ -476,7 +534,6 @@ function animateShot(v0, angleDeg) {
     function flyPhase() {
         const flyStart = performance.now();
         const speedScale = 0.0015;
-        const arrowWorldPos = new THREE.Vector3();
 
         function flyAnim() {
             const elapsed = performance.now() - flyStart;
@@ -496,8 +553,6 @@ function animateShot(v0, angleDeg) {
             const arrowAngle = Math.atan2(dirY, dirX);
 
             if (arrowMesh) {
-                arrowMesh.getWorldPosition(arrowWorldPos);
-                bedCrossbow.worldToLocal(arrowWorldPos);
                 arrowMesh.position.set(pt.x, pt.y, 0);
                 arrowMesh.rotation.y = 0;
                 arrowMesh.rotation.z = arrowAngle;
@@ -532,10 +587,10 @@ function animateDrawString() {
         if (t <= 0) {
             dir = 1;
             isAnimating = false;
-            drawFullBowString(0);
+            updateGPUStringDraw(0);
             return;
         }
-        drawFullBowString(t * 1.2);
+        updateGPUStringDraw(t * 1.2);
         requestAnimationFrame(anim);
     }
     anim();
@@ -630,6 +685,7 @@ async function runSimulation() {
     const angle = parseFloat(document.getElementById('param-angle').value) || 45;
     const armor = document.getElementById('param-armor').value;
     const arrow = document.getElementById('param-arrow').value;
+    const spin = parseFloat(document.getElementById('param-spin')?.value) || 25;
 
     try {
         const res = await fetch(`${API_BASE}/simulate?armor=${armor}&arrow=${arrow}`, {
@@ -642,12 +698,13 @@ async function runSimulation() {
                 arrow_mass: 0.2,
                 arrow_diameter: 0.012,
                 drag_coefficient: 0.4,
-                air_density: 1.225
+                air_density: 1.225,
+                spin_rate: spin
             })
         });
         if (!res.ok) throw new Error('sim failed');
         const result = await res.json();
-        updateArmorCompare(v0, arrow);
+        updateArmorCompare(v0, 0.012, 1.0, spin, arrow);
         return result;
     } catch (e) {
         const local = simulateTrajectoryLocally(v0, angle);
@@ -657,7 +714,7 @@ async function runSimulation() {
     }
 }
 
-async function updateArmorCompare(v0, arrowType) {
+async function updateArmorCompare(v0, diameter, length, spin, arrowType) {
     try {
         const res = await fetch(`${API_BASE}/penetrate/compare`, {
             method: 'POST',
@@ -665,6 +722,9 @@ async function updateArmorCompare(v0, arrowType) {
             body: JSON.stringify({
                 impact_velocity: v0,
                 arrow_mass: 0.2,
+                arrow_diameter: diameter,
+                arrow_length: length,
+                spin_rate: spin,
                 arrow_head_type: arrowType
             })
         });
@@ -721,17 +781,17 @@ function bindEvents() {
     document.getElementById('btn-reset').addEventListener('click', resetView);
     document.getElementById('btn-animate').addEventListener('click', animateDrawString);
 
-    document.getElementById('param-velocity').addEventListener('change', () => {
+    const updateCompare = () => {
         const v0 = parseFloat(document.getElementById('param-velocity').value) || 120;
         const arrow = document.getElementById('param-arrow').value;
+        const spin = parseFloat(document.getElementById('param-spin')?.value) || 25;
         updateArmorCompareLocal(v0, arrow);
-    });
-
-    document.getElementById('param-arrow').addEventListener('change', () => {
-        const v0 = parseFloat(document.getElementById('param-velocity').value) || 120;
-        const arrow = document.getElementById('param-arrow').value;
-        updateArmorCompareLocal(v0, arrow);
-    });
+    };
+    document.getElementById('param-velocity').addEventListener('change', updateCompare);
+    document.getElementById('param-arrow').addEventListener('change', updateCompare);
+    if (document.getElementById('param-spin')) {
+        document.getElementById('param-spin').addEventListener('change', updateCompare);
+    }
 }
 
 window.addEventListener('DOMContentLoaded', () => {
@@ -742,6 +802,7 @@ window.addEventListener('DOMContentLoaded', () => {
     fetchAlerts();
 
     setTimeout(() => {
+        updateGPUStringDraw(0);
         const v0 = 120;
         const result = simulateTrajectoryLocally(v0, 45);
         showTrajectory3D(result.points);
